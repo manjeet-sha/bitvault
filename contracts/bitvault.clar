@@ -311,3 +311,102 @@
     )
   )
 )
+
+;; Repay Debt and Manage Position Closure
+(define-public (repay-debt (amount uint))
+  (let (
+    (user tx-sender)
+    (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+  )
+    (begin
+      (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+      (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+      
+      ;; Process Interest Updates
+      (accrue-global-interest)
+      
+      ;; Calculate Current Position Status
+      (let (
+        (updated-position (accrue-position-interest user))
+        (current-debt (get debt updated-position))
+        (collateral (get collateral updated-position))
+        (repay-amount (if (> amount current-debt) current-debt amount))
+        (new-debt (- current-debt repay-amount))
+      )
+        (begin
+          (asserts! (<= repay-amount current-debt) ERR-INSUFFICIENT-DEBT)
+          
+          ;; Process Stablecoin Burn Transaction
+          (try! (ft-burn? stable-usd repay-amount user))
+          
+          ;; Handle Position Update or Closure
+          (if (is-eq new-debt u0)
+            ;; Complete Repayment - Close Position
+            (begin
+              (map-delete positions user)
+              (var-set total-collateral (- (var-get total-collateral) collateral))
+            )
+            ;; Partial Repayment - Update Position
+            (map-set positions user {
+              collateral: collateral,
+              debt: new-debt,
+              last-update-block: stacks-block-height
+            })
+          )
+          
+          ;; Update System Debt Metrics
+          (var-set total-debt (- (var-get total-debt) repay-amount))
+          
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+;; Withdraw Collateral with Safety Validation
+(define-public (withdraw-collateral (btc-amount uint))
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+    (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+    
+    ;; Retrieve Current Market Conditions
+    (let (
+      (btc-price (try! (get-current-price)))
+      (user tx-sender)
+    )
+      (begin
+        ;; Process System-wide Interest Updates
+        (accrue-global-interest)
+        
+        ;; Calculate Position After Withdrawal
+        (let (
+          (updated-position (accrue-position-interest user))
+          (current-debt (get debt updated-position))
+          (current-collateral (get collateral updated-position))
+          (new-collateral (- current-collateral btc-amount))
+          (min-required-collateral (required-collateral current-debt btc-price))
+        )
+          (begin
+            ;; Validate Withdrawal Safety Parameters
+            (asserts! (<= btc-amount current-collateral) ERR-INSUFFICIENT-COLLATERAL)
+            (asserts! (>= (collateral-value new-collateral btc-price) min-required-collateral) 
+                     ERR-UNDERCOLLATERALIZED)
+            
+            ;; Update Position Record
+            (map-set positions user {
+              collateral: new-collateral,
+              debt: current-debt,
+              last-update-block: stacks-block-height
+            })
+            
+            ;; Update Protocol Collateral Metrics
+            (var-set total-collateral (- (var-get total-collateral) btc-amount))
+            
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
